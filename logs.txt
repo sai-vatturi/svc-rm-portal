@@ -1,0 +1,557 @@
+
+You are GitHub Copilot Chat working as my senior backend engineer. Create and wire up a production‑leaning FastAPI + MongoDB backend for a **Release Management Portal**. Use the instructions below as a single source of truth. Deliver clean, well‑documented code and tests. Assume Python 3.11.
+
+---
+## Goals
+
+1) Stand up a FastAPI service with Swagger UI enabled and an idiomatic project layout.
+2) Persist data in MongoDB (v6+) using Motor (async). Create appropriate indexes.
+3) Implement initial domain models and endpoints reflecting the release management process and the RBAC model described below.
+4) Provide high‑quality developer experience: docker-compose, .env template, pre-commit hooks, linting/formatting, type checks, sample data seeders, and end‑to‑end HTTP tests.
+5) Make it easy to grow: clean separation of routers, services, repositories, and Pydantic schemas; consistent error handling; pagination; filtering; and role‑based authorization.
+
+---
+## Tech Stack & Tooling
+
+- **FastAPI** (>=0.115) with `/docs` and `/redoc` enabled.
+- **Uvicorn** (reload in dev).
+- **Motor** (>=3.5) for async MongoDB access.
+- **Pydantic v2** and **pydantic-settings** for configuration.
+- **Auth**: JWT (access/refresh) using `python-jose` or `authlib`, with password hashing via `passlib[bcrypt]` (for now, store users with hashed passwords; SSO can come later).
+- **Validation**: email-validator for user emails.
+- **Testing**: `pytest`, `pytest-asyncio`, `httpx` (AsyncClient), and either `testcontainers` (Mongo) or a dedicated docker-compose test profile.
+- **Quality**: `black`, `isort`, `ruff` (or flake8), `mypy`, `pre-commit`.
+- **Packaging**: keep `requirements.txt` for now to match the repo, but set up a `pyproject.toml` for tool config (black, isort, ruff, mypy).
+
+---
+## Project Structure
+
+Create (or keep, if already present) the following structure. Do **not** break existing paths; extend if the directory already exists.
+
+```
+app/
+  main.py
+  core/
+    config.py           # settings (env-based)
+    security.py         # JWT, password hashing, dependency helpers
+    logging.py          # uvicorn/structlog style logger config
+    errors.py           # exception classes + handlers
+    pagination.py       # PageQuery, CursorQuery, Paginated[T]
+  db/
+    client.py           # connect/disconnect, get_db
+    indexes.py          # create all indexes on startup
+  models/               # Pydantic request/response schemas
+    common.py
+    rbac.py
+    catalog.py
+    release.py
+    attachment.py
+  repositories/         # Mongo data access (1 file per aggregate)
+    rbac_repo.py
+    catalog_repo.py
+    release_repo.py
+    attachment_repo.py
+  services/             # Business logic and workflows
+    rbac_service.py
+    release_service.py
+    attachment_service.py
+  routers/              # FastAPI routers
+    health.py
+    auth.py
+    rbac.py
+    catalog.py
+    release.py
+    attachment.py
+  utils/
+    serial.py           # ObjectId ↔ str helpers
+    time.py             # UTC helpers (store UTC; format tz-aware when needed)
+tests/
+  e2e/
+  unit/
+scripts/
+  seed_minimal.py
+  seed_demo_data.py
+Dockerfile
+docker-compose.yml
+.env.example
+requirements.txt
+pyproject.toml
+.pre-commit-config.yaml
+README.md
+Makefile
+```
+
+Notes:
+- Keep CORS configurable with `CORS_ORIGINS` env (CSV), default allowing localhost ports for FE.
+- All datetimes are stored in **UTC**. Display can be IST (Asia/Kolkata) in a later UI; for API responses keep ISO‑8601 UTC (`Z` suffix).
+
+---
+## Configuration (.env)
+
+Provide `.env.example` with:
+```
+MONGO_URI=mongodb://mongodb:27017
+MONGO_DB_NAME=rm_release_portal
+APP_NAME=RM Release Portal API
+APP_ENV=dev
+APP_PORT=8000
+CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+JWT_SECRET=change-me-in-prod
+JWT_ALG=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+REFRESH_TOKEN_EXPIRE_MINUTES=10080
+```
+
+---
+## Domain & Data Model (map exactly as below)
+
+### RBAC
+```
+Role {
+  _id: ObjectId
+  role_name: String (unique)
+  description: String
+  is_approval_manager: Bool
+  can_create_release: Bool
+  can_edit_release_description: Bool
+  can_define_fixed_versions: Bool
+  can_manage_runbooks: Bool
+  can_manage_quality_gates: Bool
+  can_upload_attachments: Bool
+  can_manage_roles: Bool
+  can_invite_users: Bool
+  can_view_all: Bool
+  created_by: ObjectId?
+  created_at: Date
+}
+
+User {
+  _id: ObjectId
+  username: String (unique)
+  full_name: String?
+  email: String (unique, valid email)
+  password_hash: String
+  role_ids: ObjectId[]
+  assigned_squad_ids: ObjectId[]
+  created_at: Date
+}
+Relation: User (many-to-many) Role
+```
+
+### Catalog
+```
+Application {
+  _id: ObjectId
+  application_id: String (unique, human key)
+  application_name: String
+  technologies: String[]
+  description: String?
+  products: ApplicationProduct[]
+}
+
+ApplicationProduct {
+  product_id: String
+  product_name: String
+  product_owner_ids: ObjectId[]
+  product_pe_ids: ObjectId[]
+  product_jira_board_ids: ObjectId[]
+  product_squad_ids: ObjectId[]
+}
+
+Squad {
+  _id: ObjectId
+  squad_id: String (unique)
+  squad_name: String
+  squad_jira_board_ids: ObjectId[]
+  member_ids: ObjectId[]
+}
+
+JiraBoard {
+  _id: ObjectId
+  board_id: String (unique)
+  board_name: String
+  board_link: String?
+  board_type: String?
+}
+```
+
+### Release Aggregate (embedded subdocuments)
+```
+Release {
+  _id: ObjectId
+  release_id: String (unique, human key)
+  release_name: String
+  release_date: Date
+  release_type: String?
+  scope_application_ids: ObjectId[]
+  squad_ids: ObjectId[]
+  products: ReleaseProduct[]
+  runbooks: ReleaseRunbook[]
+  chg: ReleaseChange?
+  attachment_refs: AttachmentRef[]
+  created_by: ObjectId?
+  created_at: Date
+}
+
+ReleaseProduct {
+  application_id: ObjectId
+  product_id: String
+  product_name: String?
+  fixed_version: ReleaseFixedVersion?
+  version_boards: VersionBoard[]
+  quality_gates: ReleaseProductQualityGate[]
+  attachment_refs: AttachmentRef[]
+  participating_squad_ids: ObjectId[]
+}
+
+ReleaseFixedVersion { version_key: String?, version_name: String?, status: String? }
+
+VersionBoard { jira_board_id: ObjectId?, jira_board_link: String?, fixed_version_link: String? }
+
+ReleaseProductQualityGate {
+  gate_name: String
+  description: String?
+  order: Int?
+  required: Bool (default true)
+  gate_status: String?   // Enum: NOT_STARTED, IN_PROGRESS, BLOCKED, PASSED, FAILED, WAIVED
+  owner_id: ObjectId?
+  attachment_refs: AttachmentRef[]
+  milestones: ReleaseMilestone[]
+}
+
+ReleaseMilestone {
+  milestone_key: String          // unique per product.gate
+  milestone_name: String
+  environment: String?           // dev, uat, stage, prod
+  start_date: Date?
+  end_date: Date?
+  status: String?                // Enum: NOT_STARTED, IN_PROGRESS, BLOCKED, DONE
+  owner_id: ObjectId?
+  attachment_refs: AttachmentRef[]
+  approval: MilestoneApproval?
+}
+
+MilestoneApproval {
+  required: Bool
+  requires_approval_manager: Bool
+  status: String?                // Enum: NOT_REQUIRED, PENDING, APPROVED, REJECTED
+  approver_user_id: ObjectId?
+  approver_role_snapshot: String?
+  approved_at: Date?
+  comment: String?
+  attachment_refs: AttachmentRef[]
+}
+
+ReleaseRunbook {
+  runbook_id: String
+  runbook_name: String
+  description: String?
+  tasks: ReleaseRunbookTask[]
+  attachment_refs: AttachmentRef[]
+  created_by: ObjectId?
+  created_at: Date?
+}
+
+ReleaseRunbookTask {
+  task_name: String
+  description: String?
+  owner_id: ObjectId?
+  environment: String?
+  preconditions: String[]
+  commands: String[]
+  rollback_plan: String?
+  validation_steps: String[]
+  scheduled_start: Date?
+  scheduled_end: Date?
+  duration_minutes: Number?
+  depends_on_task_names: String[]
+  status: String?                // Enum: TODO, DOING, DONE, FAILED, SKIPPED
+  attachment_refs: AttachmentRef[]
+}
+
+ReleaseChange {
+  change_id: String?
+  change_type: String?
+  status: String?
+  affected_ci: String?
+  bp_signoff: Bool?
+  ctasks: ReleaseCTask[]
+  attachment_refs: AttachmentRef[]
+}
+
+ReleaseCTask {
+  ctask_id: String
+  description: String?
+  assignee_id: ObjectId?
+  start_time: Date?
+  end_time: Date?
+  status: String?                // Enum: TODO, DOING, DONE, FAILED, WAITING
+  dependency_ctask_ids: String[]
+  attachment_refs: AttachmentRef[]
+}
+
+AttachmentRef {
+  attachment_id: ObjectId
+  label: String?
+  tags: String[]
+  added_by: ObjectId?
+  added_at: Date?
+}
+```
+
+### Centralized Attachments
+```
+Attachment {
+  _id: ObjectId
+  file_name: String
+  file_type: String
+  file_size: Number
+  file_url: String
+  sha256: String (unique)
+  tags: String[]
+  uploaded_by: ObjectId?
+  uploaded_at: Date
+  links: AttachmentLink[]
+}
+
+AttachmentLink {
+  release_id?: ObjectId
+  application_id?: ObjectId
+  product_id?: String
+  runbook_id?: String
+  runbook_task_name?: String
+  gate_name?: String
+  milestone_key?: String
+  ctask_id?: String
+}
+```
+
+### Indexes (create on startup)
+- roles.role_name (unique)
+- users.username (unique), users.email (unique)
+- applications.application_id (unique)
+- squads.squad_id (unique)
+- jiraboards.board_id (unique)
+- releases.release_id (unique)
+- attachments.sha256 (unique)
+
+---
+## API Surface (MVP)
+
+Implement the following routes with request/response Pydantic schemas. Use tags: Health, Auth, RBAC, Catalog, Releases, Attachments. Return JSON with consistent envelope on errors.
+
+### Health
+- `GET /health` → `{status, app, env, time}`
+
+### Auth
+- `POST /auth/register` → create user (admin only initially via env flag or seed)
+- `POST /auth/login` → `{access_token, refresh_token, token_type}`
+- `POST /auth/refresh`
+
+### RBAC
+- `POST /rbac/roles` (admin)
+- `GET /rbac/roles`
+- `POST /rbac/users` (admin) — set roles by id array
+- `GET /rbac/users/{id}`
+- `GET /rbac/me` — return current user profile + roles
+
+### Catalog
+- `POST /catalog/applications`
+- `GET /catalog/applications`
+- `POST /catalog/squads`
+- `GET /catalog/squads`
+- `POST /catalog/jiraboards`
+- `GET /catalog/jiraboards`
+
+### Releases (core)
+- `POST /releases` — create minimal release header
+- `GET /releases` — list with pagination (`limit`, `cursor`), sort by `release_date desc`
+- `GET /releases/{id_or_key}` — by Mongo `_id` or `release_id`
+- `PATCH /releases/{id}/description` — guarded by `can_edit_release_description`
+- `POST /releases/{id}/products` — add a `ReleaseProduct`
+- `POST /releases/{id}/products/{product_id}/gates` — add a Quality Gate
+- `PATCH /releases/{id}/products/{product_id}/gates/{gate_name}` — update gate fields, including `gate_status`
+- `POST /releases/{id}/products/{product_id}/gates/{gate_name}/milestones` — add milestone
+- `PATCH /releases/{id}/products/{product_id}/gates/{gate_name}/milestones/{milestone_key}` — update milestone
+- `POST /releases/{id}/products/{product_id}/gates/{gate_name}/milestones/{milestone_key}/approve` — approval workflow:
+   - if `approval.required=true` and `requires_approval_manager=true` then only a user whose **resolved roles** contain `is_approval_manager=true` can approve.
+   - record `approver_user_id`, `approver_role_snapshot`, set `approved_at`.
+- `POST /releases/{id}/runbooks` — add runbook (with `tasks[]` optional)
+- `PATCH /releases/{id}/runbooks/{runbook_id}/tasks/{task_name}` — update task status/timing
+- `PATCH /releases/{id}/change` — upsert embedded `ReleaseChange` and `ctasks[]`
+- `POST /releases/{id}/attachments` — attach `AttachmentRef`
+- `GET /releases/{id}/summary` — computed summary (see below)
+
+### Attachments
+- `POST /attachments` — metadata only for now (`file_url` and `sha256` provided by FE or a gateway)
+- `GET /attachments` — list newest first
+
+### Pagination, Filtering & Sorting
+- Implement `?limit=, ?cursor=` (opaque base64 of last `_id`) for releases and attachments.
+- Provide common `?q=` search on `release_id`, `release_name` (case-insensitive) as a simple MVP.
+
+---
+## Business Rules (MVP)
+
+1) **Quality Gate Status**
+   - Enum: `NOT_STARTED`, `IN_PROGRESS`, `BLOCKED`, `PASSED`, `FAILED`, `WAIVED`.
+   - A gate with `required=true` must be `PASSED` to mark the release as “ready for approval”. `WAIVED` is allowed only by `is_approval_manager=true` role and must record a comment in the gate or milestone approval `comment` field.
+
+2) **Milestone Ordering**
+   - `order` on gate is optional; otherwise milestones determine sequencing by `start_date`.
+   - Prevent overlapping milestones in the **same** gate unless an explicit `allow_overlap=true` flag is provided (future: not MVP).
+
+3) **Approval Workflow**
+   - If `MilestoneApproval.required=false` → status `NOT_REQUIRED` (skip checks).
+   - If `MilestoneApproval.required=true` and `requires_approval_manager=true` → only users with `is_approval_manager=true` can approve.
+   - Approval sets `approved_at=now`, `approver_user_id`, `approver_role_snapshot` (string of role names), and `status=APPROVED`.
+
+4) **Release Summary computation (`GET /releases/{id}/summary`)**
+   - Include counts per gate status, next pending milestone(s), and flags:
+     - `all_required_gates_passed` boolean
+     - `has_blockers` boolean (any gate or milestone status BLOCKED/FAILED)
+     - `is_ready_for_approval` = `all_required_gates_passed && !has_blockers`
+
+5) **Permissions**
+   - Add dependency that resolves caller’s user and roles, then enforces flags:
+     - `can_create_release` for creating releases
+     - `can_edit_release_description`
+     - `can_manage_quality_gates` for gate/milestone changes
+     - `is_approval_manager` where required
+   - `can_view_all` → bypass simple scoping (future: scope by squads/products).
+
+---
+## Error Handling
+
+Create a unified error response model:
+```
+{ "error": { "code": "RESOURCE_NOT_FOUND", "message": "...", "details": {...} } }
+```
+Map common exceptions and validation errors with clear messages. Use FastAPI exception handlers.
+
+---
+## Security
+
+- Implement `POST /auth/login` with username+password; issue access & refresh JWTs.
+- Password hashing: bcrypt via passlib.
+- Add `get_current_user()` dependency reading `Authorization: Bearer` header.
+- Add `require_permissions(...)` helper to enforce RBAC flags per route.
+
+---
+## Logging & Tracing
+
+- Configure structured logs (JSON in prod, console in dev). Include request id and user id if present.
+- Log at INFO by default; DEBUG in `APP_ENV=dev`.
+
+---
+## Docker & Makefile
+
+- `docker-compose.yml` with services: `api`, `mongodb`, `mongo-express`.
+- `Makefile` targets: `run`, `lint`, `format`, `test`, `seed-min`, `seed-demo`.
+- Ensure `api` depends on `mongodb` and creates indexes on startup.
+
+---
+## Testing
+
+- Unit tests for services and repositories (mock DB or testcontainers).
+- E2E tests with `httpx.AsyncClient` against a live test server (use `asgi_lifespan`).
+- Test scenarios:
+  - Auth: register → login → protected endpoint 401/200 flows.
+  - RBAC: role creation, user creation with role, permission enforcement.
+  - Release: create release → add product → add gate → add milestone → approve (with and without approval manager) → summary flags.
+  - Attachments: create attachment, attach to release, uniqueness by sha256.
+
+---
+## Seeds
+
+Provide two seed scripts:
+- `scripts/seed_minimal.py`: creates one role (`Release Manager`), one user, one application, and one empty release.
+- `scripts/seed_demo_data.py`: creates richer demo incl. squads, jiraboards, products with a couple of gates and milestones in various statuses.
+
+---
+## OpenAPI & Swagger polish
+
+- Populate titles, version, description, contact, and license.
+- Add examples for key request/response bodies in schemas.
+- Ensure all routes have tags and summaries.
+
+---
+## Coding Standards
+
+- Black + isort + ruff + mypy (strict enough to catch typical issues).
+- Pre-commit hooks to run formatters and linters.
+- Type annotate public functions.
+- Keep functions small and focused; keep routers thin and move logic to services.
+
+---
+## Implementation Hints
+
+- Use helper `to_object_id(str) -> ObjectId` and serializers to return string ids in responses.
+- When fetching by `{id_or_key}`, try to parse as ObjectId else query by the human key.
+- Centralize pagination helpers to avoid duplication.
+- Create `indexes.py` that runs:
+  - roles: role_name unique
+  - users: username unique, email unique
+  - applications: application_id unique
+  - squads: squad_id unique
+  - jiraboards: board_id unique
+  - releases: release_id unique
+  - attachments: sha256 unique
+
+---
+## Deliverables
+
+1) Complete codebase as per structure.
+2) Passing test suite (`pytest -q`).
+3) `README.md` with quickstart (Docker and local), API URLs, seed instructions, and sample cURL calls.
+4) Example `.env.example` as above.
+5) Clean, readable code with docstrings where helpful.
+
+---
+## Stretch (optional, add stubs only if time permits)
+
+- Simple full-text search index on `releases` name/id.
+- Rate limiting (fastapi-limiter) for auth endpoints.
+- Background task queue stub (e.g., arq) for long-running ops.
+- File uploads endpoint that calculates `sha256` server-side (kept behind feature flag).
+
+---
+## Start
+
+1) Generate the skeleton and files per the structure above.
+2) Implement config, DB client, and index creation.
+3) Implement auth (JWT) + RBAC enforcement helpers.
+4) Implement routers (Health, Auth, RBAC, Catalog, Releases, Attachments) with services & repositories.
+5) Add tests and demo seeders.
+6) Wire Dockerfile, docker-compose, Makefile.
+7) Ensure Swagger shows all endpoints nicely with examples.
+8) Run `pytest` and fix failures.
+
+
+Here’s a simple way to run it locally on Windows without Docker.
+
+Prereqs
+
+Python 3.11+ (3.12 works)
+MongoDB (local Community Server or a MongoDB Atlas URI)
+Setup (PowerShell)
+
+Create venv and install deps:
+py -m venv .venv
+..venv\Scripts\Activate.ps1
+If you have requirements.txt: pip install -r requirements.txt
+Otherwise: pip install -U pip && pip install fastapi uvicorn[standard] motor pydantic-settings python-jose[cryptography] passlib[bcrypt] email-validator
+Start MongoDB locally (default: mongodb://localhost:27017), or get an Atlas connection string.
+Configure env (PowerShell)
+
+$env:MONGO_URI = "mongodb://localhost:27017"
+$env:MONGO_DB_NAME = "rm_release_portal"
+(Optional) $env:APP_PORT = "8000"
+Run the API
+
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+Open http://127.0.0.1:8000/docs
+Notes
+
+Do not set SKIP_DB=1 when running the API; it disables DB init and routes that hit the DB will fail.
+To run tests (no server needed): pytest -q --cov=app --cov-report=term-missing

@@ -1,0 +1,33 @@
+version: '3.9'
+services:
+  mongodb:
+    image: mongo:6
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+  mongo-express:
+    image: mongo-express:1.0.2-20
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+    environment:
+      - ME_CONFIG_MONGODB_URL=mongodb://mongodb:27017
+    ports:
+      - "8081:8081"
+  api:
+    build: .
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017
+      - MONGO_DB_NAME=rm_release_portal
+      - APP_ENV=dev
+      - APP_PORT=8000
+      - JWT_SECRET=change-me-in-prod
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongodb
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+volumes:
+  mongo_data:
