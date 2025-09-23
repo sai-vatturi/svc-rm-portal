@@ -29,7 +29,7 @@ router = APIRouter()
 
 
 @router.post("/releases", response_model=Release, summary="Create release")
-async def create_release(payload: Release, principal=Depends(require_permissions("can_create_release"))):
+async def create_release(payload: Release, principal=Depends(require_permissions("can_create_release"))):  # noqa: ARG001
     db = get_db()
     if await db.releases.find_one({"release_id": payload.release_id}):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="release_id exists")
@@ -101,6 +101,18 @@ async def add_product(id: str, payload: ReleaseProduct, _=Depends(require_permis
     return Release.model_validate(doc)
 
 
+@router.delete("/releases/{id}/products/{product_id}", response_model=Release, summary="Delete product")
+async def delete_product(id: str, product_id: str, _=Depends(require_permissions("can_manage_quality_gates"))):
+    db = get_db()
+    oid = ObjectId(id)
+    await db.releases.update_one({"_id": oid}, {"$pull": {"products": {"product_id": product_id}}})
+    doc = await db.releases.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    doc["_id"] = str(doc["_id"])
+    return Release.model_validate(doc)
+
+
 @router.post("/releases/{id}/products/{product_id}/gates", response_model=Release, summary="Add quality gate")
 async def add_quality_gate(id: str, product_id: str, payload: ReleaseProductQualityGate, _=Depends(require_permissions("can_manage_quality_gates"))):
     db = get_db()
@@ -110,6 +122,19 @@ async def add_quality_gate(id: str, product_id: str, payload: ReleaseProductQual
     if res.matched_count == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Release or product not found")
     doc = await db.releases.find_one({"_id": oid})
+    doc["_id"] = str(doc["_id"])
+    return Release.model_validate(doc)
+
+
+@router.delete("/releases/{id}/products/{product_id}/gates/{gate_name}", response_model=Release, summary="Delete quality gate")
+async def delete_quality_gate(id: str, product_id: str, gate_name: str, _=Depends(require_permissions("can_manage_quality_gates"))):
+    db = get_db()
+    oid = ObjectId(id)
+    # Pull the gate from product
+    await db.releases.update_one({"_id": oid, "products.product_id": product_id}, {"$pull": {"products.$.quality_gates": {"gate_name": gate_name}}})
+    doc = await db.releases.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     doc["_id"] = str(doc["_id"])
     return Release.model_validate(doc)
 
@@ -140,6 +165,18 @@ async def add_milestone(id: str, product_id: str, gate_name: str, payload: Relea
     if res.matched_count == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Release/product/gate not found")
     doc = await db.releases.find_one({"_id": oid})
+    doc["_id"] = str(doc["_id"])
+    return Release.model_validate(doc)
+
+
+@router.delete("/releases/{id}/products/{product_id}/gates/{gate_name}/milestones/{milestone_key}", response_model=Release, summary="Delete milestone")
+async def delete_milestone(id: str, product_id: str, gate_name: str, milestone_key: str, _=Depends(require_permissions("can_manage_quality_gates"))):
+    db = get_db()
+    oid = ObjectId(id)
+    await db.releases.update_one({"_id": oid, "products.product_id": product_id}, {"$pull": {"products.$.quality_gates.$[g].milestones": {"milestone_key": milestone_key}}}, array_filters=[{"g.gate_name": gate_name}])
+    doc = await db.releases.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     doc["_id"] = str(doc["_id"])
     return Release.model_validate(doc)
 
@@ -234,6 +271,28 @@ async def add_runbook(id: str, payload: ReleaseRunbook, principal=Depends(requir
     return Release.model_validate(doc)
 
 
+@router.get("/releases/{id}/runbooks", summary="List runbooks for a release")
+async def list_runbooks(id: str):
+    db = get_db()
+    oid = ObjectId(id)
+    doc = await db.releases.find_one({"_id": oid}, {"runbooks": 1})
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return doc.get("runbooks", [])
+
+
+@router.delete("/releases/{id}/runbooks/{runbook_id}", response_model=Release, summary="Delete runbook")
+async def delete_runbook(id: str, runbook_id: str, _=Depends(require_permissions("can_manage_runbooks"))):
+    db = get_db()
+    oid = ObjectId(id)
+    await db.releases.update_one({"_id": oid}, {"$pull": {"runbooks": {"runbook_id": runbook_id}}})
+    doc = await db.releases.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    doc["_id"] = str(doc["_id"])
+    return Release.model_validate(doc)
+
+
 @router.patch("/releases/{id}/runbooks/{runbook_id}/tasks/{task_name}", response_model=Release, summary="Update runbook task")
 async def update_runbook_task(id: str, runbook_id: str, task_name: str, payload: UpdateRunbookTask, _=Depends(require_permissions("can_manage_runbooks"))):
     db = get_db()
@@ -267,6 +326,16 @@ async def upsert_change(id: str, payload: ReleaseChange, _=Depends(require_permi
     return Release.model_validate(doc)
 
 
+@router.get("/releases/{id}/change", summary="Get release change section")
+async def get_change(id: str):
+    db = get_db()
+    oid = ObjectId(id)
+    doc = await db.releases.find_one({"_id": oid}, {"chg": 1})
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return doc.get("chg") or {}
+
+
 @router.post("/releases/{id}/attachments", response_model=Release, summary="Attach attachment to release")
 async def attach_to_release(id: str, payload: AttachmentRef, _=Depends(require_permissions("can_upload_attachments"))):
     db = get_db()
@@ -275,6 +344,18 @@ async def attach_to_release(id: str, payload: AttachmentRef, _=Depends(require_p
     if res.matched_count == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     doc = await db.releases.find_one({"_id": oid})
+    doc["_id"] = str(doc["_id"])
+    return Release.model_validate(doc)
+
+
+@router.delete("/releases/{id}/attachments/{sha256}", response_model=Release, summary="Remove attachment ref from release")
+async def delete_release_attachment(id: str, sha256: str, _=Depends(require_permissions("can_upload_attachments"))):
+    db = get_db()
+    oid = ObjectId(id)
+    await db.releases.update_one({"_id": oid}, {"$pull": {"attachment_refs": {"sha256": sha256}}})
+    doc = await db.releases.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     doc["_id"] = str(doc["_id"])
     return Release.model_validate(doc)
 

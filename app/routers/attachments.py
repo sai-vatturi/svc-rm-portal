@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.pagination import PageQuery, Paginated, encode_cursor, try_decode_cursor
 from app.core.security import require_permissions
 from app.db.client import get_db
 from app.models.attachment import Attachment
+from app.repositories.attachment_repo import AttachmentRepository
 
 router = APIRouter()
+
+
+def repo() -> AttachmentRepository:
+    return AttachmentRepository(get_db())
 
 
 @router.post("/attachments", response_model=Attachment, summary="Create attachment metadata")
@@ -45,3 +50,19 @@ async def list_attachments(q: str | None = None, page: PageQuery = Depends()):
 
     next_cursor = encode_cursor(last) if last else None
     return Paginated[Attachment](items=items, next_cursor=next_cursor)
+
+
+@router.get("/attachments/{att_id}", response_model=Attachment, summary="Get attachment by id")
+async def get_attachment(att_id: str):
+    a = await repo().get_by_id(att_id)
+    if not a:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return a
+
+
+@router.delete("/attachments/{att_id}", summary="Delete attachment")
+async def delete_attachment(att_id: str, _=Depends(require_permissions("can_upload_attachments"))):
+    deleted = await repo().delete(att_id)
+    if deleted == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return {"deleted": deleted}

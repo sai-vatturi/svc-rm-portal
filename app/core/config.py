@@ -28,6 +28,9 @@ class Settings(BaseSettings):
 
     ADMIN_REGISTRATION_ENABLED: bool = True
 
+    # New: toggle to actually enforce role permission flags. Disabled now so all endpoints work for any role.
+    RBAC_ENFORCEMENT_ENABLED: bool = False
+
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, env_file_encoding="utf-8")
 
     @field_validator("CORS_ORIGINS", mode="before")

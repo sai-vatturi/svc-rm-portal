@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
+from fastapi.openapi.utils import get_openapi
 
 from app.core.config import settings
 from app.core.logging import configure_logging
@@ -15,13 +16,32 @@ from app.routers.attachments import router as attachments_router
 from app.routers.rbac import router as rbac_router
 
 
+# Tag metadata for nicer grouped docs
+TAGS_METADATA = [
+    {"name": "Auth", "description": "Authentication & token lifecycle (login / refresh)."},
+    {"name": "RBAC", "description": "Role-based access control: roles & users."},
+    {"name": "Catalog", "description": "Applications, squads, JIRA boards registry."},
+    {"name": "Releases", "description": "Release entities, quality gates, milestones, runbooks."},
+    {"name": "Attachments", "description": "Attachment metadata & association to releases."},
+    {"name": "Health", "description": "Service health & diagnostics."},
+]
+
+# Public (no auth) routes for which we will not inject security requirements
+OPEN_ENDPOINTS = {"/health", "/auth/login", "/auth/refresh", "/auth/register", "/openapi.json"}
+
+
 def create_app() -> FastAPI:
     configure_logging()
 
     app = FastAPI(
         title=settings.APP_NAME,
         version="0.1.0",
-        description="Release Management Portal API",
+        description=(
+            "Release Management Portal API.\n\n"
+            "Use the /auth/login endpoint to obtain a JWT access & refresh token pair. "
+            "Click the green 'Authorize' button, paste the access token as: **Bearer <token>** (the prefix is added automatically if omitted).\n\n"
+            "Access tokens expire quickly; use /auth/refresh with your refresh token to get a new pair."
+        ),
         contact={
             "name": "RM API Team",
             "url": "https://example.com",
@@ -31,6 +51,13 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
+        openapi_tags=TAGS_METADATA,
+        swagger_ui_parameters={
+            # Keep entered bearer token so user does not re-enter for every refresh
+            "persistAuthorization": True,
+            "displayRequestDuration": True,
+            "filter": True,  # client-side filter box
+        },
     )
 
     # CORS
@@ -71,6 +98,42 @@ def create_app() -> FastAPI:
     async def on_shutdown() -> None:
         if not skip_db:
             await close_mongo_connection()
+
+    # Custom OpenAPI generation to inject security scheme & apply to secured endpoints
+    def custom_openapi():  # type: ignore[no-untyped-def]
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,    
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        components = schema.setdefault("components", {})
+        security_schemes = components.setdefault("securitySchemes", {})
+        security_schemes["BearerAuth"] = {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": "Paste your access token. Obtain via /auth/login."
+        }
+        # Add servers section (helpful in exported clients)
+        schema["servers"] = [
+            {"url": "http://localhost:8000", "description": "Local development"},
+        ]
+        # Inject security requirement for every operation except open endpoints
+        for path, methods in schema.get("paths", {}).items():
+            if path in OPEN_ENDPOINTS:
+                continue
+            for method_name, operation in methods.items():
+                if not isinstance(operation, dict):
+                    continue
+                # Only set if not already explicitly set
+                operation.setdefault("security", [{"BearerAuth": []}])
+        app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi  # type: ignore[assignment]
 
     return app
 

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Tuple
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.models.rbac import Role, User
+from app.models.rbac import Role, User, RoleUpdate, UserUpdate
 from app.utils.time import utcnow
 
 
@@ -53,6 +53,28 @@ class RbacRepository:
         doc = await self.db.users.find_one({"_id": ObjectId(user_id)})
         return self._to_user_model(doc) if doc else None
 
+    async def update_user(self, user_id: str, patch: UserUpdate) -> User | None:
+        sets = {k: v for k, v in patch.model_dump(exclude_unset=True).items() if v is not None}
+        if not sets:
+            doc = await self.db.users.find_one({"_id": ObjectId(user_id)})
+            return self._to_user_model(doc) if doc else None
+        res = await self.db.users.update_one({"_id": ObjectId(user_id)}, {"$set": sets})
+        if res.matched_count == 0:
+            return None
+        doc = await self.db.users.find_one({"_id": ObjectId(user_id)})
+        return self._to_user_model(doc) if doc else None
+
+    async def delete_user(self, user_id: str) -> int:
+        res = await self.db.users.delete_one({"_id": ObjectId(user_id)})
+        return res.deleted_count
+
+    async def list_users(self, skip: int = 0, limit: int = 50) -> List[User]:
+        users: List[User] = []
+        cursor = self.db.users.find().sort("username").skip(skip).limit(limit)
+        async for doc in cursor:
+            users.append(self._to_user_model(doc))
+        return users
+
     # --- roles ---
     async def create_role(self, role: Role) -> Role:
         payload = role.model_dump(by_alias=True)
@@ -78,6 +100,21 @@ class RbacRepository:
         async for doc in self.db.roles.find().sort("role_name"):
             roles.append(self._to_role_model(doc))
         return roles
+
+    async def delete_role(self, role_id: str) -> int:
+        res = await self.db.roles.delete_one({"_id": ObjectId(role_id)})
+        return res.deleted_count
+
+    async def update_role(self, role_id: str, patch: RoleUpdate) -> Role | None:
+        sets = {k: v for k, v in patch.model_dump(exclude_unset=True).items() if v is not None}
+        if not sets:
+            doc = await self.db.roles.find_one({"_id": ObjectId(role_id)})
+            return self._to_role_model(doc) if doc else None
+        res = await self.db.roles.update_one({"_id": ObjectId(role_id)}, {"$set": sets})
+        if res.matched_count == 0:
+            return None
+        doc = await self.db.roles.find_one({"_id": ObjectId(role_id)})
+        return self._to_role_model(doc) if doc else None
 
     async def get_role_by_id(self, role_id: str) -> Optional[Role]:
         doc = await self.db.roles.find_one({"_id": ObjectId(role_id)})

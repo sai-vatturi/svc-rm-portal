@@ -86,20 +86,25 @@ async def get_current_user(authorization: str | None = Header(default=None)) -> 
         "can_invite_users",
         "can_view_all",
     ]
-    perms: dict[str, bool] = {f: False for f in flags}
-    for r in roles:
-        for f in flags:
-            if getattr(r, f, False):
-                perms[f] = True
+    if not settings.RBAC_ENFORCEMENT_ENABLED:
+        # Grant everything in permissive phase
+        perms: dict[str, bool] = {f: True for f in flags}
+    else:
+        perms = {f: False for f in flags}
+        for r in roles:
+            for f in flags:
+                if getattr(r, f, False):
+                    perms[f] = True
 
     return CurrentPrincipal(user=user, role_names=role_names, permissions=perms)
 
 
 def require_permissions(*required_flags: str):
     async def _checker(principal: CurrentPrincipal = Depends(get_current_user)) -> CurrentPrincipal:
-        missing = [f for f in required_flags if not principal.permissions.get(f, False)]
-        if missing:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: missing permissions")
+        if settings.RBAC_ENFORCEMENT_ENABLED:
+            missing = [f for f in required_flags if not principal.permissions.get(f, False)]
+            if missing:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: missing permissions")
         return principal
 
     return _checker

@@ -16,7 +16,7 @@ class AttachmentRepository:
         if not doc:
             return doc
         if "_id" in doc and isinstance(doc["_id"], ObjectId):
-            doc["_id"] = str(doc["_id"])
+            doc["_id"] = str(doc["_id"])  # type: ignore[assignment]
         return doc
 
     async def upsert_by_sha(self, att: Attachment) -> Attachment:
@@ -48,3 +48,17 @@ class AttachmentRepository:
             except Exception:
                 last = None
         return items, last
+
+    async def get_by_id(self, att_id: str) -> Attachment | None:
+        try:
+            doc = await self.db.attachments.find_one({"_id": ObjectId(att_id)})
+        except Exception:
+            return None
+        return Attachment.model_validate(self._normalize(doc)) if doc else None
+
+    async def delete(self, att_id: str) -> int:
+        try:
+            res = await self.db.attachments.delete_one({"_id": ObjectId(att_id)})
+            return res.deleted_count
+        except Exception:
+            return 0

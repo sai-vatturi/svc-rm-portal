@@ -117,6 +117,9 @@ async def test_get_current_user_user_not_found_401(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_current_user_success_and_permissions_aggregate(monkeypatch):
+    # Ensure enforcement ON so permissions reflect role flags instead of permissive grant
+    prev = settings.RBAC_ENFORCEMENT_ENABLED
+    settings.RBAC_ENFORCEMENT_ENABLED = True
     access = create_access_token("u1")
 
     u = User(
@@ -151,6 +154,7 @@ async def test_get_current_user_success_and_permissions_aggregate(monkeypatch):
     assert principal.permissions["can_manage_roles"] is True
     # untouched flags remain False
     assert principal.permissions["can_create_release"] is False
+    settings.RBAC_ENFORCEMENT_ENABLED = prev
 
 
 @pytest.mark.asyncio
